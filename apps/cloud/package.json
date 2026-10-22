@@ -1,0 +1,42 @@
+{
+  "name": "cloud-connector",
+  "version": "1.0.0",
+  "description": "",
+  "license": "MIT",
+  "author": "snax-07",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "tsx watch src/server.ts",
+    "db": "npx prisma validate && npx prisma generate "
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.1",
+    "@prisma/adapter-pg": "^7.10.1",
+    "@prisma/client": "^7.10.1",
+    "bcrypt": "^6.0.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.12.5",
+    "mongoose": "^9.11.1",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "zod": "^4.6.6"
+  },
+  "allowScripts": {
+    "bcrypt@6.0.0": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20260901.1": true,
+    "fsevents@2.3.3": true,
+    "@prisma/engines@7.10.1": true,
+    "prisma@7.10.1": true
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^6.0.0",
+    "@types/node": "^26.6.5",
+    "prisma": "^7.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "overrides": {}
+}

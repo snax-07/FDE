@@ -1,0 +1,491 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [vector]
+}
+
+// ───────────────────────── ENUMS ─────────────────────────
+
+enum UserRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum IntegrationType {
+  POSTGRES
+  REST_API
+  DOCUMENT_STORE
+}
+
+enum ConnectorStatus {
+  PENDING // created, never connected
+  ONLINE
+  OFFLINE
+  REVOKED
+}
+
+enum ToolRisk {
+  READ
+  WRITE
+  DESTRUCTIVE
+}
+
+enum ToolCallStatus {
+  PENDING
+  DENIED // blocked by permission/policy
+  RUNNING
+  SUCCEEDED
+  FAILED
+  TIMED_OUT
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  RETRYING
+  DEAD // dead-lettered
+}
+
+enum DocumentStatus {
+  UPLOADED
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  TOOL
+  SYSTEM
+}
+
+enum AgentRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+  TIMED_OUT
+}
+
+// ───────────────────── PHASE 1: TENANCY & AUTH ─────────────────────
+
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  industry  String? // "ecommerce" | "saas" | "logistics" (your simulated customers)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  apiKeys       ApiKey[]
+  integrations  Integration[]
+  connectors    EdgeConnector[]
+  secrets       Secret[]
+  tools         Tool[]
+  permissions   ToolPermission[]
+  documents     Document[]
+  chunks        DocumentChunk[]
+  conversations Conversation[]
+  messages      Message[]
+  agentRuns     AgentRun[]
+  toolCalls     ToolCall[]
+  jobs          Job[]
+  auditLogs     AuditLog[]
+  spans         TraceSpan[]
+}
+
+model User {
+  id           String    @id @default(uuid())
+  tenantId     String
+  email        String
+  passwordHash String
+  role         UserRole  @default(MEMBER)
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations       Conversation[]
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+  auditLogs           AuditLog[]
+
+  // same email can exist in two tenants; unique per tenant
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model Session {
+  id               String    @id @default(uuid())
+  userId           String
+  refreshTokenHash String    @unique // store a hash, never the raw token
+  userAgent        String?
+  ip               String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model ApiKey {
+  id         String    @id @default(uuid())
+  tenantId   String
+  name       String
+  prefix     String // first 8 chars, shown in UI
+  keyHash    String    @unique // hash only
+  scopes     String[]
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// ───────────────── PHASE 2: INTEGRATIONS, SECRETS, TOOLS ─────────────────
+
+model Secret {
+  id         String    @id @default(uuid())
+  tenantId   String
+  name       String
+  ciphertext String // encrypted value (AES-GCM / KMS envelope). NEVER plaintext.
+  keyVersion Int       @default(1) // for rotation
+  createdAt  DateTime  @default(now())
+  rotatedAt  DateTime?
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integrations Integration[]
+
+  @@unique([tenantId, name])
+}
+
+model Integration {
+  id          String          @id @default(uuid())
+  tenantId    String
+  name        String // "Orders API", "Shipments DB"
+  type        IntegrationType
+  baseUrl     String? // for REST_API (internal address as seen by the connector)
+  config      Json // non-secret config: host, port, db name, auth style, etc.
+  secretId    String? // credentials live in Secret, not in config
+  connectorId String? // which edge connector reaches this system
+  isEnabled   Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  tenant    Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  secret    Secret?        @relation(fields: [secretId], references: [id])
+  connector EdgeConnector? @relation(fields: [connectorId], references: [id])
+  tools     Tool[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Tool {
+  id               String   @id @default(uuid())
+  tenantId         String
+  integrationId    String
+  name             String // "get_shipment"
+  description      String // what the LLM sees
+  inputSchema      Json // JSON Schema for validation
+  risk             ToolRisk @default(READ)
+  requiresApproval Boolean  @default(false) // human-in-the-loop for WRITE/DESTRUCTIVE
+  timeoutMs        Int      @default(10000)
+  rateLimitPerMin  Int      @default(60)
+  isEnabled        Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integration Integration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  permissions ToolPermission[]
+  toolCalls   ToolCall[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, isEnabled])
+}
+
+// Which ROLE may use which TOOL (RBAC for the agent, evaluated on the caller's role)
+model ToolPermission {
+  id        String   @id @default(uuid())
+  tenantId  String
+  toolId    String
+  role      UserRole
+  allowed   Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tool   Tool   @relation(fields: [toolId], references: [id], onDelete: Cascade)
+
+  @@unique([toolId, role])
+  @@index([tenantId])
+}
+
+// ───────────────── PHASE 3: EDGE CONNECTOR ─────────────────
+
+model EdgeConnector {
+  id         String          @id @default(uuid())
+  tenantId   String
+  name       String
+  status     ConnectorStatus @default(PENDING)
+  tokenHash  String          @unique // enrollment/auth token, hashed
+  version    String?
+  hostname   String?
+  lastSeenAt DateTime? // updated by heartbeat
+  lastIp     String?
+  createdAt  DateTime        @default(now())
+  revokedAt  DateTime?
+
+  tenant       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integrations Integration[]
+  heartbeats   ConnectorHeartbeat[]
+
+  @@index([tenantId, status])
+}
+
+model ConnectorHeartbeat {
+  id          String   @id @default(uuid())
+  connectorId String
+  latencyMs   Int?
+  cpuPercent  Float?
+  memoryMb    Int?
+  createdAt   DateTime @default(now())
+
+  connector EdgeConnector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@index([connectorId, createdAt])
+}
+
+// ───────────────── PHASE 4: RAG ─────────────────
+
+model Document {
+  id        String         @id @default(uuid())
+  tenantId  String
+  title     String
+  source    String? // filename / url
+  mimeType  String?
+  checksum  String? // dedupe re-uploads
+  status    DocumentStatus @default(UPLOADED)
+  error     String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  tenant Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  chunks DocumentChunk[]
+
+  @@unique([tenantId, checksum])
+  @@index([tenantId, status])
+}
+
+model DocumentChunk {
+  id         String                       @id @default(uuid())
+  tenantId   String // denormalized ON PURPOSE so every vector query filters by tenant
+  documentId String
+  chunkIndex Int
+  content    String
+  tokenCount Int?
+  // pgvector. Prisma can't query this natively -> use $queryRaw for similarity search.
+  embedding  Unsupported("vector(1536)")?
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+  @@index([tenantId])
+}
+
+// ───────────────── PHASE 5: AGENT, CONVERSATIONS, TOOL CALLS ─────────────────
+
+model Conversation {
+  id        String   @id @default(uuid())
+  tenantId  String
+  userId    String
+  title     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  agentRuns AgentRun[]
+
+  @@index([tenantId, userId, updatedAt])
+}
+
+model Message {
+  id             String      @id @default(uuid())
+  tenantId       String
+  conversationId String
+  role           MessageRole
+  content        String
+  toolCallId     String? // for TOOL-role messages
+  createdAt      DateTime    @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([tenantId])
+}
+
+// One user question -> one AgentRun. This is your unit of observability.
+model AgentRun {
+  id                 String         @id @default(uuid())
+  tenantId           String
+  conversationId     String
+  status             AgentRunStatus @default(RUNNING)
+  model              String
+  promptTokens       Int            @default(0)
+  completionTokens   Int            @default(0)
+  costUsd            Decimal?       @db.Decimal(10, 6)
+  llmLatencyMs       Int?
+  retrievalLatencyMs Int?
+  totalLatencyMs     Int?
+  error              String?
+  startedAt          DateTime       @default(now())
+  finishedAt         DateTime?
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  toolCalls    ToolCall[]
+  spans        TraceSpan[]
+
+  @@index([tenantId, startedAt])
+  @@index([status])
+}
+
+model ToolCall {
+  id             String         @id @default(uuid())
+  tenantId       String
+  agentRunId     String
+  toolId         String
+  status         ToolCallStatus @default(PENDING)
+  input          Json
+  output         Json?
+  error          String?
+  denyReason     String? // why permission check blocked it
+  idempotencyKey String? // so retries don't double-create tickets
+  latencyMs      Int?
+  approvedById   String? // if requiresApproval
+  createdAt      DateTime       @default(now())
+  finishedAt     DateTime?
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+  tool     Tool     @relation(fields: [toolId], references: [id])
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, status])
+  @@index([agentRunId])
+}
+
+// ───────────────── PHASE 6: QUEUE / WORKFLOWS ─────────────────
+// Redis/BullMQ runs the queue; this table is the durable record of it.
+
+model Job {
+  id             String    @id @default(uuid())
+  tenantId       String
+  type           String // "ingest_document", "bulk_process", "tool_execution"
+  payload        Json
+  status         JobStatus @default(QUEUED)
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(5)
+  nextRunAt      DateTime?
+  lastError      String?
+  result         Json?
+  idempotencyKey String?
+  createdAt      DateTime  @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  attemptsLog JobAttempt[]
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, status])
+  @@index([status, nextRunAt])
+}
+
+model JobAttempt {
+  id         String    @id @default(uuid())
+  jobId      String
+  attemptNo  Int
+  error      String?
+  durationMs Int?
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, attemptNo])
+}
+
+// ───────────────── PHASE 7: AUDIT & OBSERVABILITY ─────────────────
+
+// Append-only. Never UPDATE or DELETE rows here (enforce with DB permissions/trigger).
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String
+  actorId    String? // null for system actions
+  action     String // "tool.denied", "apikey.created", "connector.revoked"
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  actor  User?  @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action])
+}
+
+// Poor man's tracing: one row per hop. This is how you find the 5.8s customer API call.
+model TraceSpan {
+  id           String   @id @default(uuid())
+  tenantId     String
+  agentRunId   String
+  parentSpanId String?
+  name         String // "llm.call", "rag.retrieve", "edge.forward", "customer_api"
+  startedAt    DateTime
+  durationMs   Int
+  status       String // "ok" | "error"
+  attributes   Json?
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  agentRun AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+
+  @@index([agentRunId])
+  @@index([tenantId, startedAt])
+}
