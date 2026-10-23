@@ -14,6 +14,7 @@ import {
   updateDashboardData,
   type DashboardRecord,
 } from "@/src/lib/dashboard-data"
+import {updatePreviewData} from "@/src/lib/preview-data"
 import {createResource, deleteResource, updateResource} from "@/src/lib/services/resource-service"
 
 function display(value: unknown): string {
@@ -189,14 +190,15 @@ function Modal({
 }
 
 export default function Dashboard() {
-  const {session, isLoading, signIn, signUp, signOut} = useAuth()
-  const {data, resourceErrors, isLoading: isDataLoading} = useDashboardData(session?.tenant.id, session?.user.id)
+  const {session, isPreview, isLoading, enterPreview, signIn, signUp, signOut} = useAuth()
+  const {data, resourceErrors, isLoading: isDataLoading} = useDashboardData(session?.tenant.id, session?.user.id, isPreview, session?.sessionId)
   const [activeEntity, setActiveEntity] = useState("overview")
   const selectedTenant = session?.tenant.id ?? ""
   const [activeConversationId, setActiveConversationId] = useState("")
   const [search, setSearch] = useState("")
   const [modal, setModal] = useState<{entity: EntityDefinition; record: DashboardRecord | null} | null>(null)
   const [toast, setToast] = useState("")
+  const [previewChatInput, setPreviewChatInput] = useState("")
 
   useEffect(() => {
     if (!toast) return
@@ -230,6 +232,21 @@ export default function Dashboard() {
     const entity = modal.entity
     const existing = modal.record
     try {
+      if (isPreview) {
+        const record = {
+          ...values,
+          id: existing?.id ?? `preview_${entity.key}_${Date.now()}`,
+        }
+        updatePreviewData((current) => ({
+          ...current,
+          [entity.key]: existing
+            ? (current[entity.key] ?? []).map((row) => row.id === existing.id ? record : row)
+            : [record, ...(current[entity.key] ?? [])],
+        }))
+        setModal(null)
+        notify(`${entity.singular} ${existing ? "updated" : "created"} in preview`)
+        return
+      }
       const record = existing
         ? await updateResource(entity.key, String(existing.id), values)
         : await createResource(entity.key, values)
@@ -248,17 +265,24 @@ export default function Dashboard() {
 
   async function deleteRecord(entity: EntityDefinition, record: DashboardRecord) {
     if (!window.confirm(`Delete this ${entity.singular.toLowerCase()}?`)) return
-    try {
-      await deleteResource(entity.key, String(record.id))
-    } catch (error) {
-      notify(error instanceof Error ? error.message : `Could not delete ${entity.singular.toLowerCase()}`)
-      return
+    if (isPreview) {
+      updatePreviewData((current) => ({
+        ...current,
+        [entity.key]: (current[entity.key] ?? []).filter((row) => row.id !== record.id),
+      }))
+    } else {
+      try {
+        await deleteResource(entity.key, String(record.id))
+      } catch (error) {
+        notify(error instanceof Error ? error.message : `Could not delete ${entity.singular.toLowerCase()}`)
+        return
+      }
+      updateDashboardData((current) => ({
+        ...current,
+        [entity.key]: (current[entity.key] ?? []).filter((row) => row.id !== record.id),
+      }))
     }
-    updateDashboardData((current) => ({
-      ...current,
-      [entity.key]: (current[entity.key] ?? []).filter((row) => row.id !== record.id),
-    }))
-    notify(`${entity.singular} deleted`)
+    notify(`${entity.singular} deleted${isPreview ? " from preview" : ""}`)
   }
 
   function exportData() {
@@ -266,7 +290,7 @@ export default function Dashboard() {
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement("a")
     anchor.href = url
-    anchor.download = "fde-dashboard-data.json"
+    anchor.download = isPreview ? "forgeops-preview-data.json" : "fde-dashboard-data.json"
     anchor.click()
     URL.revokeObjectURL(url)
     notify("Data exported")
@@ -285,12 +309,55 @@ export default function Dashboard() {
     ? (data.messages ?? []).filter((message) => message.conversationId === selectedConversation.id).sort((a,b) => String(a.createdAt).localeCompare(String(b.createdAt)))
     : []
 
+  function submitPreviewChat(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const content = previewChatInput.trim()
+    if (!isPreview || !content || !selectedConversation) return
+    const normalized = content.toLowerCase()
+    const response = normalized.includes("refund") || normalized.includes("return")
+      ? "Preview response: the returns policy allows requests within 30 days of delivery. Refunds over €250 need an operations administrator's approval. No live systems were contacted."
+      : normalized.includes("order") || normalized.includes("ship") || normalized.includes("track")
+        ? "Preview response: the shipment is in transit from the Rotterdam hub, with delivery estimated tomorrow by 18:00 UTC. This is a synthetic sample response; no carrier API was called."
+        : "Preview response: I can help look up orders, track shipments, and answer questions from the operations knowledge base. This reply is synthetic and no live systems were contacted."
+    const createdAt = new Date().toISOString()
+    const messageId = `preview_message_${Date.now()}`
+    updatePreviewData((current) => ({
+      ...current,
+      messages: [
+        ...(current.messages ?? []),
+        {id: `${messageId}_user`, tenantId: session?.tenant.id ?? "preview_tenant_01", conversationId: String(selectedConversation.id), role: "USER", content, toolCallId: null, createdAt},
+        {id: `${messageId}_assistant`, tenantId: session?.tenant.id ?? "preview_tenant_01", conversationId: String(selectedConversation.id), role: "ASSISTANT", content: response, toolCallId: null, createdAt: new Date(Date.now() + 1).toISOString()},
+      ],
+      conversations: (current.conversations ?? []).map((conversation) => conversation.id === selectedConversation.id ? {...conversation, updatedAt: createdAt} : conversation),
+    }))
+    setPreviewChatInput("")
+  }
+
+  function setPreviewApproval(record: DashboardRecord, status: "SUCCEEDED" | "DENIED") {
+    if (!isPreview) return
+    updatePreviewData((current) => ({
+      ...current,
+      toolCalls: (current.toolCalls ?? []).map((call) => call.id === record.id
+        ? {
+          ...call,
+          status,
+          approvedById: status === "SUCCEEDED" ? session?.user.id ?? null : null,
+          denyReason: status === "DENIED" ? "Denied in the interactive preview." : null,
+          output: status === "SUCCEEDED" ? {preview: true, result: "Approval simulated; no external action was executed."} : null,
+          latencyMs: 0,
+          finishedAt: new Date().toISOString(),
+        }
+        : call),
+    }))
+    notify(`Sample tool call ${status === "SUCCEEDED" ? "approved" : "denied"}`)
+  }
+
   if (isLoading) {
     return <main className="login-screen"><section className="login-card"><div className="login-brand"><span className="brand-mark">F</span><span className="brand-copy"><strong>ForgeOps</strong><small>CONTROL PLANE</small></span></div><p className="login-intro">Restoring your session…</p></section></main>
   }
 
   if (!session) {
-    return <AuthScreen onSignIn={signIn} onSignUp={signUp}/>
+    return <AuthScreen onPreview={enterPreview} onSignIn={signIn} onSignUp={signUp}/>
   }
 
   function handleSignOut() {
@@ -344,7 +411,7 @@ export default function Dashboard() {
               </select>
               <span className="chevron">⌄</span>
             </label>
-            <span className="api-pill"><i/> LIVE API</span>
+            <span className={`api-pill ${isPreview ? "preview-pill" : ""}`}><i/> {isPreview ? "SYNTHETIC PREVIEW" : "LIVE API"}</span>
             <button className="icon-button notification" aria-label="Notifications">♧</button>
             <span className="avatar top-avatar">{session.user.email.slice(0, 2).toUpperCase()}</span>
           </div>
@@ -357,14 +424,14 @@ export default function Dashboard() {
                 <div>
                   <div className="eyebrow">CONTROL PLANE / OVERVIEW</div>
                   <h1>Welcome, {session.user.email.split("@")[0]} <span className="wave">✳</span></h1>
-                  <p>Live data for {display(tenant?.name ?? session.tenant.name)}.</p>
+                  <p>{isPreview ? "Synthetic sample workspace for" : "Live data for"} {display(tenant?.name ?? session.tenant.name)}.</p>
                 </div>
                 <button className="button primary" onClick={() => setModal({entity: entities[0], record: null})}><Icon name="Plus"/> Create tenant</button>
               </div>
 
-              <div className="api-banner">
-                <span className="banner-icon">↗</span>
-                <div><strong>Cloud API connection</strong><p>{isDataLoading ? "Loading workspace resources…" : Object.keys(resourceErrors).length ? `${Object.keys(resourceErrors).length} resource endpoints are unavailable.` : "Workspace data loaded from the Cloud API."}</p></div>
+              <div className={`api-banner ${isPreview ? "preview-banner" : ""}`}>
+                <span className="banner-icon">{isPreview ? "◈" : "↗"}</span>
+                <div><strong>{isPreview ? "Interactive preview · synthetic data" : "Cloud API connection"}</strong><p>{isPreview ? "Sample records are held in memory only. No API requests or persistent writes are made." : isDataLoading ? "Loading workspace resources…" : Object.keys(resourceErrors).length ? `${Object.keys(resourceErrors).length} resource endpoints are unavailable.` : "Workspace data loaded from the Cloud API."}</p></div>
                 <button onClick={exportData}>Export data <Icon name="Export"/></button>
               </div>
 
@@ -391,23 +458,43 @@ export default function Dashboard() {
                 <section className="panel system-panel">
                   <div className="panel-heading"><div><h2>System status</h2><p>Latest health by service</p></div><span className="status-live"><i/> Unverified</span></div>
                   <div className="status-list">
-                    <StatusRow label="API gateway" status="Unknown" detail="Health API is not connected"/>
-                    <StatusRow label="Agent runtime" status="Unknown" detail={`${tenantRuns.filter((row) => row.status === "RUNNING").length} active runs in returned data`}/>
-                    <StatusRow label="Document pipeline" status="Unknown" detail={`${tenantDocs.filter((row) => row.status === "PROCESSING").length} processing`}/>
-                    <StatusRow label="Edge connectors" status="Unknown" detail={`${(data.connectors ?? []).length} registered`}/>
+                    <StatusRow label="API gateway" status={isPreview ? "Sample" : "Unknown"} detail={isPreview ? "Synthetic health status · not connected" : "Health API is not connected"}/>
+                    <StatusRow label="Agent runtime" status={isPreview ? "Operational" : "Unknown"} detail={`${tenantRuns.filter((row) => row.status === "RUNNING").length} active runs in sample data`}/>
+                    <StatusRow label="Document pipeline" status={isPreview ? "Operational" : "Unknown"} detail={`${tenantDocs.filter((row) => row.status === "PROCESSING").length} processing`}/>
+                    <StatusRow label="Edge connectors" status={isPreview ? "Operational" : "Unknown"} detail={`${(data.connectors ?? []).length} registered in sample data`}/>
                   </div>
                   <div className="system-footer"><span>Last checked just now</span><button className="text-button" onClick={() => setActiveEntity("connectors")}>View connectors →</button></div>
                 </section>
               </div>
+
+              {isPreview && pendingCalls.length > 0 && (
+                <section className="panel approval-panel">
+                  <div className="panel-heading"><div><h2>Tool approval queue</h2><p>Review the sample requests; actions only update this in-memory preview.</p></div><Badge value={`${pendingCalls.length} PENDING`}/></div>
+                  <div className="approval-list">
+                    {pendingCalls.map((call) => {
+                      const tool = (data.tools ?? []).find((item) => item.id === call.toolId)
+                      return (
+                        <div className="approval-row" key={String(call.id)}>
+                          <span className="metric-icon amber">◷</span>
+                          <div className="approval-copy"><strong>{display(tool?.name ?? call.toolId)}</strong><small>{display(call.input)} · requested {prettyDate(call.createdAt)}</small></div>
+                          <button className="button secondary compact" onClick={() => setPreviewApproval(call, "DENIED")}>Deny sample</button>
+                          <button className="button primary compact" onClick={() => setPreviewApproval(call, "SUCCEEDED")}>Approve sample</button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <p className="preview-action-note">Approving marks this sample call complete with a simulated result. No integration or external tool is called.</p>
+                </section>
+              )}
 
               <div className="lower-grid">
                 <section className="panel usage-panel">
                   <div className="panel-heading"><div><h2>Agent activity</h2><p>Runs and outcomes in this workspace</p></div><button className="text-button" onClick={() => setActiveEntity("agentRuns")}>All runs →</button></div>
                   <div className="chart-legend"><span>Successful</span><span>Failed</span><strong>{tenantRuns.length} total runs</strong></div>
                   <div className="activity-list">
-                    <StatusRow label="Successful" status="Live data" detail={String(tenantRuns.filter((row) => row.status === "SUCCEEDED").length)}/>
-                    <StatusRow label="Failed" status="Live data" detail={String(tenantRuns.filter((row) => row.status === "FAILED").length)}/>
-                    <StatusRow label="Running" status="Live data" detail={String(tenantRuns.filter((row) => row.status === "RUNNING").length)}/>
+                    <StatusRow label="Successful" status={isPreview ? "Sample" : "Live data"} detail={String(tenantRuns.filter((row) => row.status === "SUCCEEDED").length)}/>
+                    <StatusRow label="Failed" status={isPreview ? "Sample" : "Live data"} detail={String(tenantRuns.filter((row) => row.status === "FAILED").length)}/>
+                    <StatusRow label="Running" status={isPreview ? "Sample" : "Live data"} detail={String(tenantRuns.filter((row) => row.status === "RUNNING").length)}/>
                   </div>
                 </section>
                 <section className="panel quick-panel">
@@ -426,8 +513,8 @@ export default function Dashboard() {
           ) : activeEntity === "playground" ? (
             <section className="records-page">
               <div className="page-heading">
-                <div><div className="eyebrow">AGENT / PLAYGROUND</div><h1>Agent chat</h1><p>Conversation data is loaded from the Cloud API.</p></div>
-                <span className="api-pill"><i/> LIVE API</span>
+                <div><div className="eyebrow">AGENT / PLAYGROUND</div><h1>Agent chat</h1><p>{isPreview ? "Explore seeded conversation flows and synthetic agent responses." : "Conversation data is loaded from the Cloud API."}</p></div>
+                <span className={`api-pill ${isPreview ? "preview-pill" : ""}`}><i/> {isPreview ? "SYNTHETIC PREVIEW" : "LIVE API"}</span>
               </div>
               <div className="chat-layout">
                 <aside className="panel conversation-panel">
@@ -453,21 +540,36 @@ export default function Dashboard() {
                   ) : (
                     <div className="chat-empty"><span className="chat-empty-mark">✳</span><h2>No messages</h2><p>Agent chat is unavailable until the Cloud API exposes an agent-run endpoint.</p></div>
                   )}
-                  <div className="chat-composer"><textarea placeholder="Chat API endpoint not available" rows={2} disabled/><div><span>Cloud agent endpoint required</span><button className="button primary" type="button" disabled>Send <span>↑</span></button></div></div>
+                  {isPreview ? (
+                    <form className="chat-composer" onSubmit={submitPreviewChat}>
+                      <textarea aria-label="Preview message" placeholder="Try “Track order NS-48291” or ask about refunds…" rows={2} value={previewChatInput} onChange={(event) => setPreviewChatInput(event.target.value)}/>
+                      <div><span>Sample response only · no API calls</span><button className="button primary" type="submit" disabled={!previewChatInput.trim()}>Send <span>↑</span></button></div>
+                    </form>
+                  ) : (
+                    <div className="chat-composer"><textarea placeholder="Chat API endpoint not available" rows={2} disabled/><div><span>Cloud agent endpoint required</span><button className="button primary" type="button" disabled>Send <span>↑</span></button></div></div>
+                  )}
                 </section>
               </div>
-              <div className="model-info"><span className="info-mark">i</span><span>The Cloud API currently does not expose an agent-run endpoint.</span></div>
+              <div className="model-info"><span className="info-mark">i</span><span>{isPreview ? "Preview chat responses are deterministic samples; no model or integrations are called." : "The Cloud API currently does not expose an agent-run endpoint."}</span></div>
             </section>
           ) : activeEntity === "agent-config" ? (
             <section className="records-page">
               <div className="page-heading">
                 <div><div className="eyebrow">AGENT / CONFIGURATION</div><h1>Agent builder</h1><p>The Prisma schema does not currently define an agent configuration model.</p></div>
-                <span className="api-pill"><i/> API REQUIRED</span>
+                <span className={`api-pill ${isPreview ? "preview-pill" : ""}`}><i/> {isPreview ? "SAMPLE PROFILE" : "API REQUIRED"}</span>
               </div>
               <div className="agent-builder-grid">
                 <section className="panel builder-panel">
-                  <div className="panel-heading"><div><h2>Agent settings</h2><p>Values are kept in this tab only; the Prisma schema has no Agent model yet.</p></div></div>
-                  <EmptyState title="No agent configuration endpoint" copy="The Prisma schema and Cloud API do not currently expose agent configuration. No local draft is stored."/>
+                  <div className="panel-heading"><div><h2>{isPreview ? "Sample agent profile" : "Agent settings"}</h2><p>{isPreview ? "Illustrative UI only; agent configuration is not a Prisma model and is not saved." : "Values are kept in this tab only; the Prisma schema has no Agent model yet."}</p></div></div>
+                  {isPreview ? (
+                    <div className="sample-profile">
+                      <div><span>DISPLAY NAME</span><strong>Northstar Operations Assistant</strong></div>
+                      <div><span>MODEL PROFILE</span><strong>Fast responses · tool-aware</strong></div>
+                      <div><span>KNOWLEDGE</span><strong>{tenantDocs.filter((document) => document.status === "READY").length} ready sources · retrieval enabled</strong></div>
+                      <div><span>AVAILABLE TOOLS</span><strong>{(data.tools ?? []).filter((tool) => tool.isEnabled).length} enabled · approval-gated writes</strong></div>
+                      <p>This sample profile demonstrates the control surface. The Cloud API and current Prisma schema do not expose these settings.</p>
+                    </div>
+                  ) : <EmptyState title="No agent configuration endpoint" copy="The Prisma schema and Cloud API do not currently expose agent configuration. No local draft is stored."/>}
                 </section>
                 <aside className="panel builder-side">
                   <div className="panel-heading"><div><h2>Not configured</h2><p>Waiting for an API resource.</p></div></div>
@@ -506,10 +608,10 @@ export default function Dashboard() {
                 </div>
                 <div className="table-footer"><span>Showing <strong>{visibleRows.length}</strong> of <strong>{(data[active.key] ?? []).filter((row) => selectedTenant === "all" || !active.tenantScoped || rowTenantId(active.key, row, data) === selectedTenant).length}</strong> records</span><div><button disabled>← Previous</button><span className="page-number">1</span><button disabled>Next →</button></div></div>
               </section>
-              <div className="model-info"><span className="info-mark">i</span><span>{active.key === "auditLogs" ? "Audit records are append-only; existing entries cannot be edited or deleted." : `Data is read from the Cloud API resource for ${active.singular}.`}</span><button onClick={() => setActiveEntity("overview")}>Back to overview</button></div>
+              <div className="model-info"><span className="info-mark">i</span><span>{isPreview ? "Synthetic sample records are editable in memory only and reset when you leave the preview." : active.key === "auditLogs" ? "Audit records are append-only; existing entries cannot be edited or deleted." : `Data is read from the Cloud API resource for ${active.singular}.`}</span><button onClick={() => setActiveEntity("overview")}>Back to overview</button></div>
             </section>
           ) : null}
-          <footer className="page-footer"><span>ForgeOps Control Plane</span><div><span><i className="footer-dot"/> Connected to Cloud API</span><span>v0.1.0</span></div></footer>
+          <footer className="page-footer"><span>ForgeOps Control Plane</span><div><span><i className={`footer-dot ${isPreview ? "preview-footer-dot" : ""}`}/> {isPreview ? "Synthetic preview · memory only" : "Connected to Cloud API"}</span><span>v0.1.0</span></div></footer>
         </div>
       </main>
       {modal && <Modal entity={modal.entity} record={modal.record} selectedTenant={selectedTenant} onClose={() => setModal(null)} onSave={saveRecord}/>}

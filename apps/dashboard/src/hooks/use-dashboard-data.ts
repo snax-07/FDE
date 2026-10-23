@@ -2,16 +2,22 @@
 
 import {useEffect, useState, useSyncExternalStore} from "react"
 import {createEmptyDashboardData, entities, getDashboardServerSnapshot, getDashboardSnapshot, subscribeToDashboardData, updateDashboardData, type DashboardDatabase} from "@/src/lib/dashboard-data"
+import {getEmptyPreviewSnapshot, getPreviewData, subscribeToPreviewData} from "@/src/lib/preview-data"
 import {listResource} from "@/src/lib/services/resource-service"
 
-export function useDashboardData(tenantId?: string, userId?: string) {
-  const data = useSyncExternalStore(subscribeToDashboardData, getDashboardSnapshot, getDashboardServerSnapshot)
+export function useDashboardData(tenantId?: string, userId?: string, isPreview = false, sessionId?: string) {
+  const data = useSyncExternalStore(
+    isPreview ? subscribeToPreviewData : subscribeToDashboardData,
+    isPreview ? getPreviewData : getDashboardSnapshot,
+    isPreview ? getEmptyPreviewSnapshot : getDashboardServerSnapshot,
+  )
   const [resourceErrors, setResourceErrors] = useState<Record<string, string>>({})
   const [isLoading, setIsLoading] = useState(false)
   const [loadedSessionKey, setLoadedSessionKey] = useState<string | null>(null)
-  const sessionKey = tenantId && userId ? `${tenantId}:${userId}` : null
+  const sessionKey = tenantId && userId ? `${tenantId}:${userId}:${sessionId ?? ""}` : null
 
   useEffect(() => {
+    if (isPreview) return
     if (!tenantId || !sessionKey) return
     let active = true
     void Promise.resolve().then(async () => {
@@ -46,12 +52,12 @@ export function useDashboardData(tenantId?: string, userId?: string) {
     })
 
     return () => { active = false }
-  }, [tenantId, sessionKey])
+  }, [tenantId, sessionKey, isPreview])
 
   const isCurrentSessionLoaded = loadedSessionKey === sessionKey
   return {
-    data: isCurrentSessionLoaded ? data : createEmptyDashboardData(),
-    resourceErrors: isCurrentSessionLoaded ? resourceErrors : {},
-    isLoading: Boolean(sessionKey) && (isLoading || !isCurrentSessionLoaded),
+    data: isPreview ? data : isCurrentSessionLoaded ? data : createEmptyDashboardData(),
+    resourceErrors: isPreview ? {} : isCurrentSessionLoaded ? resourceErrors : {},
+    isLoading: !isPreview && Boolean(sessionKey) && (isLoading || !isCurrentSessionLoaded),
   }
 }

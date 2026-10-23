@@ -1,7 +1,8 @@
 # ForgeOps Dashboard
 
-The dashboard uses the Cloud API and contains no seeded records, mock
-credentials, or local CRUD fallback.
+The dashboard uses the Cloud API for normal sign-in and resource requests. Its
+optional interactive preview contains synthetic records for every Prisma model
+and never sends those records to the Cloud API or stores them persistently.
 
 ## Run locally
 
@@ -27,6 +28,16 @@ resource routes are implemented there, the dashboard shows the API errors
 instead of substituting local sample data. Agent chat/configuration also remain
 unavailable because the Cloud API and Prisma schema do not define those
 endpoints/resources yet.
+
+From the sign-in screen, select **Explore interactive preview** to enter a
+separate in-memory sample workspace. Preview records cover all 21 dashboard
+resources, including successful and failed states, pending approvals, retries,
+and trace spans. You can explore and edit these records, try deterministic
+sample chat replies, and simulate tool approvals; no external actions are
+executed. The preview is visibly labeled and resets when you leave it or reload
+the page. It does not use the live API, local storage, real credentials,
+passwords, or usable secret material. Fields that represent hashes or encrypted
+values contain inert placeholders, and vector embeddings are not fabricated.
 
 No API key belongs in browser code. The dashboard sends the signed-in
 session's bearer token. For production, prefer an HttpOnly server-managed

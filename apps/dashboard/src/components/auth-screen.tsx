@@ -5,6 +5,7 @@ import {ApiError} from "@/src/lib/api/errors"
 import type {LoginInput, RegisterInput} from "@/src/lib/services/auth-service"
 
 type AuthScreenProps = {
+  onPreview: () => void
   onSignIn: (input: LoginInput) => Promise<void>
   onSignUp: (input: RegisterInput) => Promise<void>
 }
@@ -13,7 +14,7 @@ function slugify(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48)
 }
 
-export default function AuthScreen({onSignIn, onSignUp}: AuthScreenProps) {
+export default function AuthScreen({onPreview, onSignIn, onSignUp}: AuthScreenProps) {
   const [mode, setMode] = useState<"login" | "register">("login")
   const [tenantName, setTenantName] = useState("")
   const [tenantSlug, setTenantSlug] = useState("")
@@ -116,6 +117,13 @@ export default function AuthScreen({onSignIn, onSignUp}: AuthScreenProps) {
             {mode === "login" ? "Create an account" : "Sign in"}
           </button>
         </p>
+        {mode === "login" && (
+          <div className="preview-entry">
+            <span>Want to explore first?</span>
+            <button className="button secondary" type="button" onClick={onPreview}>Explore interactive preview <span>→</span></button>
+            <small>Uses synthetic sample records only. Nothing is sent or saved.</small>
+          </div>
+        )}
         <div className="login-note"><span>i</span><p>Credentials are sent to the configured Cloud API. No API key is required in the browser.</p></div>
         <div className="login-footer"><span>ForgeOps workspace</span><span>v0.1.0</span></div>
       </section>

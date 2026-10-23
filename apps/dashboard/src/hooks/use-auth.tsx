@@ -4,12 +4,15 @@ import {createContext, useCallback, useContext, useEffect, useMemo, useState, ty
 import {ApiError} from "@/src/lib/api/errors"
 import {clearStoredSession, getStoredSession, storeSession} from "@/src/lib/auth/session"
 import {clearLegacyDashboardData} from "@/src/lib/dashboard-data"
+import {previewSession, resetPreviewData} from "@/src/lib/preview-data"
 import {currentUser, login as loginRequest, logout as logoutRequest, register as registerRequest, type LoginInput, type RegisterInput} from "@/src/lib/services/auth-service"
 import type {AuthSession} from "@/src/types/api"
 
 type AuthContextValue = {
   session: AuthSession | null
+  isPreview: boolean
   isLoading: boolean
+  enterPreview: () => void
   signIn: (input: LoginInput) => Promise<void>
   signUp: (input: RegisterInput) => Promise<void>
   signOut: () => Promise<void>
@@ -19,6 +22,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 
 export function AuthProvider({children}: {children: ReactNode}) {
   const [session, setSession] = useState<AuthSession | null>(null)
+  const [isPreview, setIsPreview] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
 
   useEffect(() => {
@@ -56,6 +60,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
   const signIn = useCallback(async (input: LoginInput): Promise<void> => {
     const nextSession = await loginRequest(input)
     storeSession(nextSession)
+    setIsPreview(false)
     setSession(nextSession)
   }, [])
 
@@ -64,13 +69,22 @@ export function AuthProvider({children}: {children: ReactNode}) {
     await signIn({tenantSlug: input.tenantSlug, email: input.email, password: input.password})
   }, [signIn])
 
-  const signOut = useCallback(async (): Promise<void> => {
-    await logoutRequest()
+  const enterPreview = useCallback(() => {
     clearStoredSession()
-    setSession(null)
+    resetPreviewData()
+    setIsPreview(true)
+    setSession(previewSession)
   }, [])
 
-  const value = useMemo(() => ({session, isLoading, signIn, signUp, signOut}), [session, isLoading, signIn, signUp, signOut])
+  const signOut = useCallback(async (): Promise<void> => {
+    if (isPreview) resetPreviewData()
+    else await logoutRequest()
+    clearStoredSession()
+    setIsPreview(false)
+    setSession(null)
+  }, [isPreview])
+
+  const value = useMemo(() => ({session, isPreview, isLoading, enterPreview, signIn, signUp, signOut}), [session, isPreview, isLoading, enterPreview, signIn, signUp, signOut])
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
 
